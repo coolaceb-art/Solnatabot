@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: relay
+    description: Helius Telegram relay operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,34 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /relay/status:
+    get:
+      operationId: getRelayStatus
+      tags: [relay]
+      summary: Get relay status
+      description: Returns Telegram configuration and the latest delivery state.
+      responses:
+        "200":
+          description: Relay status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RelayStatus"
+  /relay/events:
+    get:
+      operationId: getRelayEvents
+      tags: [relay]
+      summary: List recent relay events
+      description: Returns the most recent Helius webhook deliveries held by this server.
+      responses:
+        "200":
+          description: Recent relay events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RelayEvent"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +63,59 @@ components:
           type: string
       required:
         - status
+    RelayStatus:
+      type: object
+      properties:
+        configured:
+          type: boolean
+        tokenConfigured:
+          type: boolean
+        chatIdConfigured:
+          type: boolean
+        endpointPath:
+          type: string
+        recentEventCount:
+          type: number
+        lastDeliveryAt:
+          type: ["string", "null"]
+        lastDeliveryStatus:
+          type: ["string", "null"]
+          enum: [delivered, failed, null]
+        lastDeliveryError:
+          type: ["string", "null"]
+      required:
+        - configured
+        - tokenConfigured
+        - chatIdConfigured
+        - endpointPath
+        - recentEventCount
+        - lastDeliveryAt
+        - lastDeliveryStatus
+        - lastDeliveryError
+    RelayEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        receivedAt:
+          type: string
+        eventType:
+          type: string
+        summary:
+          type: string
+        signature:
+          type: ["string", "null"]
+        status:
+          type: string
+          enum: [delivered, failed]
+        error:
+          type: ["string", "null"]
+      required:
+        - id
+        - receivedAt
+        - eventType
+        - summary
+        - signature
+        - status
+        - error
 

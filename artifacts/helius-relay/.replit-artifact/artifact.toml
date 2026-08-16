@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Helius Telegram Relay"
+description = "A publishable dashboard for monitoring a Helius Solana webhook relay, checking Telegram delivery configuration, viewing recent alert activity, and copying the public webhook endpoint."
+version = "1.0.0"
+id = "artifacts/helius-relay"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22309
+
+[services.development]
+run = "pnpm --filter @workspace/helius-relay run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/helius-relay", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/helius-relay/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22309"
+BASE_PATH = "/"

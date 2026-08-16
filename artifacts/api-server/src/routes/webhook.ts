@@ -1,4 +1,8 @@
 import { Router, type IRouter, type Request, type Response } from "express";
+import {
+  markRelayDelivery,
+  recordRelayEvents,
+} from "../lib/relay-state";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -203,16 +207,25 @@ async function handleWebhook(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  const eventIds = recordRelayEvents(payload);
+
   try {
     const message = formatHeliusPayload(payload);
     await sendTelegramAlert(message);
-    req.log.info({ eventCount: Array.isArray(payload) ? payload.length : 1 }, "Helius alert forwarded to Telegram");
+    markRelayDelivery(eventIds, "delivered");
+    req.log.info(
+      { eventCount: Array.isArray(payload) ? payload.length : 1 },
+      "Helius alert forwarded to Telegram",
+    );
     res.status(200).json({ ok: true });
   } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to send Telegram alert.";
+    markRelayDelivery(eventIds, "failed", message);
     req.log.error({ err: error }, "Failed to forward Helius alert to Telegram");
     res.status(502).json({
       ok: false,
-      error: error instanceof Error ? error.message : "Failed to send Telegram alert.",
+      error: message,
     });
   }
 }
