@@ -4,28 +4,21 @@ import {
   recordRelayEvents,
 } from "../lib/relay-state";
 
-type JsonRecord = Record<string, unknown>;
+type AlertData = {
+  action: string;
+  solAmount: string | number;
+  tokenSymbol: string;
+  ca: string;
+  mc: string;
+  chartLink: string;
+  buyLink: string;
+  txLink: string;
+  walletLabel: string;
+};
 
-const TELEGRAM_MAX_MESSAGE_LENGTH = 4096;
 const router: IRouter = Router();
-
-function asRecord(value: unknown): JsonRecord | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as JsonRecord)
-    : null;
-}
-
-function asString(value: unknown): string | null {
-  if (typeof value === "string" && value.length > 0) {
-    return value;
-  }
-
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-
-  return null;
-}
+const FREE_DELAY_MS = 60 * 1000;
+const MIN_SOL_FOR_FREE = 5;
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -35,201 +28,176 @@ function escapeHtml(value: unknown): string {
     .replaceAll('"', "&quot;");
 }
 
-function shorten(value: unknown, maxLength = 180): string {
-  const text = asString(value) ?? "Unknown";
-  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+function safeLink(value: unknown, fallback: string): string {
+  const link = typeof value === "string" && value.trim() ? value.trim() : fallback;
+  return escapeHtml(link);
 }
 
-function formatLamports(value: unknown): string {
-  const amount = typeof value === "string" ? Number(value) : value;
+function formatVIPAlert(data: AlertData): { text: string; options: Record<string, unknown> } {
+  const isBuy = String(data.action).toLowerCase() === "buy";
+  const emoji = isBuy ? "🟢" : "🔴";
 
-  if (typeof amount === "number" && Number.isFinite(amount)) {
-    return `${(amount / 1_000_000_000).toLocaleString("en-US", {
-      maximumFractionDigits: 9,
-    })} SOL`;
-  }
+  const text = `
+${emoji} <b>SMART MONEY ${escapeHtml(data.action).toUpperCase()}</b>
 
-  return shorten(value);
+<b>Wallet:</b> ${escapeHtml(data.walletLabel)}
+<b>Size:</b> ${escapeHtml(data.solAmount)} SOL
+<b>Token:</b> ${escapeHtml(data.tokenSymbol)}
+<b>CA:</b> <code>${escapeHtml(data.ca)}</code>
+
+<b>MC at alert:</b> ${escapeHtml(data.mc)}
+`.trim();
+
+  return {
+    text,
+    options: {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "📊 Chart", url: safeLink(data.chartLink, "https://dexscreener.com/solana") },
+          { text: "⚡ Fast Buy", url: safeLink(data.buyLink, "https://t.me") },
+          { text: "🔗 TX", url: safeLink(data.txLink, "https://solscan.io") },
+        ]],
+      },
+    },
+  };
 }
 
-function formatFields(record: JsonRecord, fields: string[]): string[] {
-  return fields.flatMap((field) => {
-    const value = asString(record[field]);
-    return value ? [`<b>${escapeHtml(field)}:</b> ${escapeHtml(shorten(value))}`] : [];
-  });
+function formatFreeAlert(data: AlertData): { text: string; options: Record<string, unknown> } {
+  const isBuy = String(data.action).toLowerCase() === "buy";
+  const emoji = isBuy ? "🟢" : "🔴";
+
+  const text = `
+${emoji} <b>${escapeHtml(data.action).toUpperCase()}</b> · ${escapeHtml(data.solAmount)} SOL
+${escapeHtml(data.tokenSymbol)}
+<code>${escapeHtml(data.ca)}</code>
+
+<b>MC:</b> ${escapeHtml(data.mc)}
+`.trim();
+
+  return {
+    text,
+    options: {
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "📊 Chart", url: safeLink(data.chartLink, "https://dexscreener.com/solana") },
+          { text: "🛒 Buy", url: safeLink(data.buyLink, "https://t.me") },
+          { text: "🔗 TX", url: safeLink(data.txLink, "https://solscan.io") },
+        ]],
+      },
+    },
+  };
 }
 
-function formatTransferList(
-  value: unknown,
-  label: string,
-  amountFormatter: (value: unknown) => string,
-): string[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    return [];
-  }
-
-  const lines = [`<b>${escapeHtml(label)}:</b>`];
-
-  for (const item of value.slice(0, 10)) {
-    const transfer = asRecord(item);
-    if (!transfer) {
-      continue;
-    }
-
-    const from =
-      asString(transfer.fromUserAccount) ??
-      asString(transfer.fromTokenAccount) ??
-      "Unknown sender";
-    const to =
-      asString(transfer.toUserAccount) ??
-      asString(transfer.toTokenAccount) ??
-      "Unknown recipient";
-    const amount =
-      transfer.amount !== undefined
-        ? amountFormatter(transfer.amount)
-        : shorten(transfer.tokenAmount);
-    const mint = asString(transfer.mint);
-    const suffix = mint ? ` | Mint: <code>${escapeHtml(shorten(mint, 90))}</code>` : "";
-
-    lines.push(
-      `• <code>${escapeHtml(shorten(from, 90))}</code> → <code>${escapeHtml(shorten(to, 90))}</code>: ${escapeHtml(amount)}${suffix}`,
-    );
-  }
-
-  if (value.length > 10) {
-    lines.push(`…and ${value.length - 10} more`);
-  }
-
-  return lines;
-}
-
-function formatEvent(event: JsonRecord, index: number): string {
-  const lines = [
-    index > 0 ? "" : "",
-    `<b>${escapeHtml(asString(event.type) ?? "Solana activity")}</b>`,
-  ];
-
-  lines.push(...formatFields(event, ["source", "description", "feePayer", "slot", "timestamp"]));
-
-  const signature = asString(event.signature);
-  if (signature) {
-    const link = `https://solscan.io/tx/${encodeURIComponent(signature)}`;
-    lines.push(`<b>Transaction:</b> <a href="${escapeHtml(link)}">${escapeHtml(shorten(signature, 100))}</a>`);
-  }
-
-  if (event.fee !== undefined) {
-    lines.push(`<b>Fee:</b> ${escapeHtml(formatLamports(event.fee))}`);
-  }
-
-  const transactionError = event.transactionError ?? event.err;
-  if (transactionError !== undefined && transactionError !== null) {
-    lines.push(`<b>Transaction error:</b> <code>${escapeHtml(shorten(transactionError, 300))}</code>`);
-  }
-
-  lines.push(...formatTransferList(event.nativeTransfers, "Native transfers", formatLamports));
-  lines.push(
-    ...formatTransferList(event.tokenTransfers, "Token transfers", (amount) => shorten(amount)),
-  );
-
-  if (Array.isArray(event.accountData) && event.accountData.length > 0) {
-    lines.push(`<b>Account changes:</b> ${event.accountData.length}`);
-  }
-
-  if (lines.length === 2) {
-    const fallback = JSON.stringify(event, null, 2) ?? "{}";
-    lines.push(`<pre>${escapeHtml(shorten(fallback, 2_000))}</pre>`);
-  }
-
-  return lines.join("\n");
-}
-
-function formatHeliusPayload(payload: unknown): string {
-  const events = Array.isArray(payload) ? payload : [payload];
-  const validEvents = events
-    .map(asRecord)
-    .filter((event): event is JsonRecord => event !== null);
-
-  const sections = [
-    "<b>Helius Solana Alert</b>",
-    `<i>${validEvents.length} event${validEvents.length === 1 ? "" : "s"} received</i>`,
-    ...validEvents.map(formatEvent),
-  ];
-
-  const message = sections.join("\n\n");
-  if (message.length <= TELEGRAM_MAX_MESSAGE_LENGTH) {
-    return message;
-  }
-
-  return `${message.slice(0, TELEGRAM_MAX_MESSAGE_LENGTH - 40)}\n\n<i>Alert truncated.</i>`;
-}
-
-async function sendTelegramAlert(message: string): Promise<void> {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.CHAT_ID;
-
-  if (!token || !chatId) {
-    throw new Error(
-      "Telegram configuration is missing. Set TELEGRAM_BOT_TOKEN and CHAT_ID.",
-    );
+async function sendTelegramMessage(
+  chatId: string,
+  text: string,
+  options: Record<string, unknown>,
+): Promise<void> {
+  const token = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+  if (!token) {
+    throw new Error("TELEGRAM_BOT_TOKEN or BOT_TOKEN is not configured.");
   }
 
   const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: message,
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-    }),
+    body: JSON.stringify({ chat_id: chatId, text, ...options }),
   });
 
   if (!response.ok) {
-    const responseText = await response.text();
-    throw new Error(
-      `Telegram API returned ${response.status}: ${shorten(responseText, 500)}`,
-    );
+    const details = await response.text();
+    throw new Error(`Telegram API returned ${response.status}: ${details.slice(0, 500)}`);
   }
 }
 
-async function handleWebhook(req: Request, res: Response): Promise<void> {
-  const payload = req.body;
-  const hasPayload =
-    Array.isArray(payload)
-      ? payload.length > 0
-      : (() => {
-          const record = asRecord(payload);
-          return record !== null && Object.keys(record).length > 0;
-        })();
+async function sendAlert(data: AlertData, log: Request["log"]): Promise<void> {
+  try {
+    const solAmountNum = Number.parseFloat(String(data.solAmount));
+    const vipChannelId = process.env.VIP_CHANNEL_ID;
+    const freeChannelId = process.env.FREE_CHANNEL_ID;
 
-  if (!hasPayload) {
-    res.status(400).json({ ok: false, error: "A Helius JSON payload is required." });
+    if (vipChannelId) {
+      const vip = formatVIPAlert(data);
+      await sendTelegramMessage(vipChannelId, vip.text, vip.options);
+    }
+
+    if (freeChannelId && solAmountNum >= MIN_SOL_FOR_FREE) {
+      const free = formatFreeAlert(data);
+      setTimeout(() => {
+        void sendTelegramMessage(freeChannelId, free.text, free.options).catch((error: unknown) => {
+          log.error({ err: error }, "Free alert error");
+        });
+      }, FREE_DELAY_MS);
+    }
+  } catch (error) {
+    log.error({ err: error }, "sendAlert error");
+    throw error;
+  }
+}
+
+function normalizeAlert(event: Record<string, unknown>): AlertData {
+  const ca = typeof event.ca === "string" && event.ca
+    ? event.ca
+    : "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump";
+  const signature = typeof event.signature === "string" ? event.signature : "";
+
+  return {
+    action: typeof event.action === "string" && event.action ? event.action : "Buy",
+    solAmount: typeof event.solAmount === "string" || typeof event.solAmount === "number"
+      ? event.solAmount
+      : 12.8,
+    tokenSymbol: typeof event.tokenSymbol === "string" && event.tokenSymbol ? event.tokenSymbol : "$TICKER",
+    ca,
+    mc: typeof event.mc === "string" && event.mc ? event.mc : "$38K",
+    chartLink: typeof event.chartLink === "string" && event.chartLink
+      ? event.chartLink
+      : `https://dexscreener.com/solana/${ca}`,
+    buyLink: typeof event.buyLink === "string" && event.buyLink
+      ? event.buyLink
+      : "https://t.me/solana_trojanbot?start=r-your_id",
+    txLink: typeof event.txLink === "string" && event.txLink
+      ? event.txLink
+      : `https://solscan.io/tx/${signature}`,
+    walletLabel: typeof event.walletLabel === "string" && event.walletLabel
+      ? event.walletLabel
+      : "Whale #17",
+  };
+}
+
+router.post("/webhook", async (req: Request, res: Response): Promise<void> => {
+  res.status(200).send("OK");
+
+  const payload: unknown = req.body;
+  if (!payload) {
     return;
   }
 
+  const events = Array.isArray(payload) ? payload : [payload];
   const eventIds = recordRelayEvents(payload);
 
   try {
-    const message = formatHeliusPayload(payload);
-    await sendTelegramAlert(message);
-    markRelayDelivery(eventIds, "delivered");
-    req.log.info(
-      { eventCount: Array.isArray(payload) ? payload.length : 1 },
-      "Helius alert forwarded to Telegram",
-    );
-    res.status(200).json({ ok: true });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to send Telegram alert.";
-    markRelayDelivery(eventIds, "failed", message);
-    req.log.error({ err: error }, "Failed to forward Helius alert to Telegram");
-    res.status(502).json({
-      ok: false,
-      error: message,
-    });
-  }
-}
+    for (const item of events) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        continue;
+      }
 
-router.post("/webhook", handleWebhook);
+      const data = normalizeAlert(item as Record<string, unknown>);
+      if (data.tokenSymbol && data.ca) {
+        await sendAlert(data, req.log);
+      }
+    }
+
+    markRelayDelivery(eventIds, "delivered");
+    req.log.info({ eventCount: events.length }, "Smart money alert forwarded");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Webhook processing failed.";
+    markRelayDelivery(eventIds, "failed", message);
+    req.log.error({ err: error }, "Webhook processing error");
+  }
+});
 
 export default router;

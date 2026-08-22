@@ -23,3 +23,6 @@ timeoutMs = 20000
 
 [userenv.shared]
 CHAT_ID = "7361308644"
+
+[nix]
+channel = "stable-25_05"
