@@ -1,202 +1,196 @@
-import { Router, type IRouter, type Request, type Response } from "express";
-import {
-  markRelayDelivery,
-  recordRelayEvents,
-} from "../lib/relay-state";
+import { Router, Request, Response } from "express";
 
-type AlertData = {
-  action: string;
-  solAmount: string | number;
-  tokenSymbol: string;
-  ca: string;
-  mc: string;
-  chartLink: string;
-  buyLink: string;
-  txLink: string;
+const router = Router();
+
+// Environment Variables
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || "";
+const VIP_CHANNEL_ID = process.env.VIP_CHANNEL_ID || "";
+const FREE_CHANNEL_ID = process.env.FREE_CHANNEL_ID || "";
+const MIN_SOL_TO_ALERT = 0.1; // Minimum SOL threshold to trigger alerts
+
+// Ignore stablecoins (USDC, USDT, USD1)
+const IGNORED_MINTS = new Set([
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+  "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB"  // USD1
+]);
+
+const WSOL_MINT = "So11111111111111111111111111111111111111112";
+
+interface ParsedSwap {
+  type: "BUY" | "SELL";
+  tokenMint: string;
+  solAmount: number;
+  tokenAmount: number;
+  wallet: string;
   walletLabel: string;
-};
-
-const router: IRouter = Router();
-const FREE_DELAY_MS = 60 * 1000;
-const MIN_SOL_FOR_FREE = 5;
-
-function escapeHtml(value: unknown): string {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+  signature: string;
+  source: string;
 }
 
-function safeLink(value: unknown, fallback: string): string {
-  const link = typeof value === "string" && value.trim() ? value.trim() : fallback;
-  return escapeHtml(link);
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
-function formatVIPAlert(data: AlertData): { text: string; options: Record<string, unknown> } {
-  const isBuy = String(data.action).toLowerCase() === "buy";
-  const emoji = isBuy ? "🟢" : "🔴";
-
-  const text = `
-${emoji} <b>SMART MONEY ${escapeHtml(data.action).toUpperCase()}</b>
-
-<b>Wallet:</b> ${escapeHtml(data.walletLabel)}
-<b>Size:</b> ${escapeHtml(data.solAmount)} SOL
-<b>Token:</b> ${escapeHtml(data.tokenSymbol)}
-<b>CA:</b> <code>${escapeHtml(data.ca)}</code>
-
-<b>MC at alert:</b> ${escapeHtml(data.mc)}
-`.trim();
-
-  return {
-    text,
-    options: {
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      reply_markup: {
-        inline_keyboard: [[
-          { text: "📊 Chart", url: safeLink(data.chartLink, "https://dexscreener.com/solana") },
-          { text: "⚡ Fast Buy", url: safeLink(data.buyLink, "https://t.me") },
-          { text: "🔗 TX", url: safeLink(data.txLink, "https://solscan.io") },
-        ]],
-      },
-    },
-  };
+function shortAddress(addr: string): string {
+  if (!addr || addr.length < 8) return "Unknown";
+  return `${addr.slice(0, 4)}...${addr.slice(-4)}`;
 }
 
-function formatFreeAlert(data: AlertData): { text: string; options: Record<string, unknown> } {
-  const isBuy = String(data.action).toLowerCase() === "buy";
-  const emoji = isBuy ? "🟢" : "🔴";
-
-  const text = `
-${emoji} <b>${escapeHtml(data.action).toUpperCase()}</b> · ${escapeHtml(data.solAmount)} SOL
-${escapeHtml(data.tokenSymbol)}
-<code>${escapeHtml(data.ca)}</code>
-
-<b>MC:</b> ${escapeHtml(data.mc)}
-`.trim();
-
-  return {
-    text,
-    options: {
-      parse_mode: "HTML",
-      disable_web_page_preview: true,
-      reply_markup: {
-        inline_keyboard: [[
-          { text: "📊 Chart", url: safeLink(data.chartLink, "https://dexscreener.com/solana") },
-          { text: "🛒 Buy", url: safeLink(data.buyLink, "https://t.me") },
-          { text: "🔗 TX", url: safeLink(data.txLink, "https://solscan.io") },
-        ]],
-      },
-    },
-  };
-}
-
-async function sendTelegramMessage(
-  chatId: string,
-  text: string,
-  options: Record<string, unknown>,
-): Promise<void> {
-  const token = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
-  if (!token) {
-    throw new Error("TELEGRAM_BOT_TOKEN or BOT_TOKEN is not configured.");
-  }
-
-  const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, ...options }),
-  });
-
-  if (!response.ok) {
-    const details = await response.text();
-    throw new Error(`Telegram API returned ${response.status}: ${details.slice(0, 500)}`);
-  }
-}
-
-async function sendAlert(data: AlertData, log: Request["log"]): Promise<void> {
+function parseHeliusSwap(tx: any): ParsedSwap | null {
   try {
-    const solAmountNum = Number.parseFloat(String(data.solAmount));
-    const vipChannelId = process.env.VIP_CHANNEL_ID;
-    const freeChannelId = process.env.FREE_CHANNEL_ID;
+    if (!tx || (tx.type && tx.type !== "SWAP")) return null;
 
-    if (vipChannelId) {
-      const vip = formatVIPAlert(data);
-      await sendTelegramMessage(vipChannelId, vip.text, vip.options);
+    const tokenTransfers: any[] = tx.tokenTransfers || [];
+    const nativeTransfers: any[] = tx.nativeTransfers || [];
+    const source: string = tx.source || "DEX";
+    const signature: string = tx.signature || "";
+
+    // Dynamic wallet resolution directly from Helius feePayer
+    const activeWallet: string = tx.feePayer || (tokenTransfers[0]?.fromUserAccount) || "";
+    if (!activeWallet) return null;
+
+    let targetTokenMint = "";
+    let targetTokenAmount = 0;
+    let isBuy = false;
+
+    // Identify primary non-stable token involved in the trade
+    for (const t of tokenTransfers) {
+      if (IGNORED_MINTS.has(t.mint)) continue;
+
+      if (t.fromUserAccount === activeWallet || t.toUserAccount === activeWallet) {
+        const amt = Number(t.tokenAmount) || 0;
+        if (!targetTokenMint || amt > targetTokenAmount) {
+          targetTokenMint = t.mint;
+          targetTokenAmount = amt;
+          isBuy = t.toUserAccount === activeWallet;
+        }
+      }
     }
 
-    if (freeChannelId && solAmountNum >= MIN_SOL_FOR_FREE) {
-      const free = formatFreeAlert(data);
-      setTimeout(() => {
-        void sendTelegramMessage(freeChannelId, free.text, free.options).catch((error: unknown) => {
-          log.error({ err: error }, "Free alert error");
-        });
-      }, FREE_DELAY_MS);
+    if (!targetTokenMint) return null;
+
+    // Calculate SOL volume (Check WSOL transfers first, then Native SOL fallback)
+    let solAmount = 0;
+
+    for (const t of tokenTransfers) {
+      if (t.mint === WSOL_MINT && (t.fromUserAccount === activeWallet || t.toUserAccount === activeWallet)) {
+        solAmount += Number(t.tokenAmount) || 0;
+      }
     }
-  } catch (error) {
-    log.error({ err: error }, "sendAlert error");
-    throw error;
+
+    if (solAmount === 0) {
+      for (const n of nativeTransfers) {
+        if (n.fromUserAccount === activeWallet || n.toUserAccount === activeWallet) {
+          const amt = (Number(n.amount) || 0) / 1e9;
+          if (amt > 0.005) { // Filter out minor network gas/rent fees
+            solAmount += amt;
+          }
+        }
+      }
+    }
+
+    if (solAmount < MIN_SOL_TO_ALERT) return null;
+
+    return {
+      type: isBuy ? "BUY" : "SELL",
+      tokenMint: targetTokenMint,
+      solAmount: Number(solAmount.toFixed(4)),
+      tokenAmount: targetTokenAmount,
+      wallet: activeWallet,
+      walletLabel: shortAddress(activeWallet),
+      signature,
+      source
+    };
+  } catch (err: any) {
+    console.error("parseHeliusSwap error:", err.message);
+    return null;
   }
 }
 
-function normalizeAlert(event: Record<string, unknown>): AlertData {
-  const ca = typeof event.ca === "string" && event.ca
-    ? event.ca
-    : "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump";
-  const signature = typeof event.signature === "string" ? event.signature : "";
-
-  return {
-    action: typeof event.action === "string" && event.action ? event.action : "Buy",
-    solAmount: typeof event.solAmount === "string" || typeof event.solAmount === "number"
-      ? event.solAmount
-      : 12.8,
-    tokenSymbol: typeof event.tokenSymbol === "string" && event.tokenSymbol ? event.tokenSymbol : "$TICKER",
-    ca,
-    mc: typeof event.mc === "string" && event.mc ? event.mc : "$38K",
-    chartLink: typeof event.chartLink === "string" && event.chartLink
-      ? event.chartLink
-      : `https://dexscreener.com/solana/${ca}`,
-    buyLink: typeof event.buyLink === "string" && event.buyLink
-      ? event.buyLink
-      : "https://t.me/solana_trojanbot?start=r-your_id",
-    txLink: typeof event.txLink === "string" && event.txLink
-      ? event.txLink
-      : `https://solscan.io/tx/${signature}`,
-    walletLabel: typeof event.walletLabel === "string" && event.walletLabel
-      ? event.walletLabel
-      : "Whale #17",
-  };
+async function getDexScreenerData(mint: string) {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+    const data = (await res.json()) as any;
+    const pair = data?.pairs?.[0];
+    return {
+      symbol: escapeHtml(pair?.baseToken?.symbol || "TOKEN"),
+      name: escapeHtml(pair?.baseToken?.name || "Solana Token"),
+      marketCap: pair?.marketCap ? `$${pair.marketCap.toLocaleString()}` : "N/A",
+    };
+  } catch {
+    return { symbol: "MEME", name: "Solana Token", marketCap: "N/A" };
+  }
 }
 
-router.post("/webhook", async (req: Request, res: Response): Promise<void> => {
+async function sendTelegramMessage(chatId: string, text: string, replyMarkup?: any) {
+  if (!chatId || !TELEGRAM_BOT_TOKEN) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: text,
+        parse_mode: "HTML",
+        reply_markup: replyMarkup,
+      }),
+    });
+  } catch (err: any) {
+    console.error("Telegram Delivery Error:", err.message);
+  }
+}
+
+router.post("/", async (req: Request, res: Response) => {
   res.status(200).send("OK");
 
-  const payload: unknown = req.body;
-  if (!payload) {
-    return;
-  }
+  const events = Array.isArray(req.body) ? req.body : [req.body];
 
-  const events = Array.isArray(payload) ? payload : [payload];
-  const eventIds = recordRelayEvents(payload);
+  for (const event of events) {
+    const swap = parseHeliusSwap(event);
+    if (!swap) continue;
 
-  try {
-    for (const item of events) {
-      if (typeof item !== "object" || item === null || Array.isArray(item)) {
-        continue;
-      }
+    const meta = await getDexScreenerData(swap.tokenMint);
+    const emoji = swap.type === "BUY" ? "🟢" : "🔴";
 
-      const data = normalizeAlert(item as Record<string, unknown>);
-      if (data.tokenSymbol && data.ca) {
-        await sendAlert(data, req.log);
-      }
+    const vipMsg =
+      `${emoji} <b>WHALE ${swap.type}</b> [${escapeHtml(swap.source)}]\n\n` +
+      `<b>Wallet:</b> <code>${swap.walletLabel}</code>\n` +
+      `<b>Amount:</b> ${swap.solAmount.toFixed(2)} SOL\n` +
+      `<b>Token:</b> $${meta.symbol}\n` +
+      `<b>Market Cap:</b> ${meta.marketCap}\n\n` +
+      `<b>CA:</b> <code>${swap.tokenMint}</code>`;
+
+    const freeMsg =
+      `${emoji} <b>WHALE ${swap.type} · ${swap.solAmount.toFixed(1)} SOL</b>\n\n` +
+      `<b>Token:</b> $${meta.symbol}\n` +
+      `<b>Market Cap:</b> ${meta.marketCap}\n\n` +
+      `<b>CA:</b> <code>${swap.tokenMint}</code>`;
+
+    const inlineKeyboard = {
+      inline_keyboard: [
+        [
+          { text: "📊 Chart", url: `https://dexscreener.com/solana/${swap.tokenMint}` },
+          { text: "⚡ Fast Buy", url: `https://photon-sol.tinyastro.io/en/lp/${swap.tokenMint}` },
+          { text: "🔗 TX", url: `https://solscan.io/tx/${swap.signature}` },
+        ],
+      ],
+    };
+
+    if (VIP_CHANNEL_ID) {
+      await sendTelegramMessage(VIP_CHANNEL_ID, vipMsg, inlineKeyboard);
     }
 
-    markRelayDelivery(eventIds, "delivered");
-    req.log.info({ eventCount: events.length }, "Smart money alert forwarded");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Webhook processing failed.";
-    markRelayDelivery(eventIds, "failed", message);
-    req.log.error({ err: error }, "Webhook processing error");
+    if (FREE_CHANNEL_ID && swap.solAmount >= 5) {
+      setTimeout(() => {
+        sendTelegramMessage(FREE_CHANNEL_ID, freeMsg, inlineKeyboard).catch((err) => {
+          console.error("Delayed Send Error:", err.message);
+        });
+      }, 60000);
+    }
   }
 });
 
