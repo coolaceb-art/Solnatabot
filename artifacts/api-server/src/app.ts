@@ -33,7 +33,7 @@ app.use(express.urlencoded({ extended: true }));
 app.get("/", (_req, res) => {
   res.send("Solnata Webhook Server is active");
 });
-app.use(webhookRouter);
+app.use("/webhook", webhookRouter);
 app.use("/api", router);
 
 export default app;
