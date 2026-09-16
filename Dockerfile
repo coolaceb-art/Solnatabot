@@ -8,14 +8,14 @@ RUN npm install -g pnpm
 # Copy everything
 COPY . .
 
-# Allow esbuild to run its build scripts
-RUN pnpm config set onlyBuiltDependencies "esbuild"
+# Force allow esbuild build scripts
+RUN pnpm config set only-built-dependencies esbuild
 
-# Install without frozen lockfile
+# Install
 RUN pnpm install --no-frozen-lockfile
 
 # Build the api-server
 RUN pnpm --filter @workspace/api-server run build
 
-# Start the server
+# Start
 CMD ["pnpm", "--filter", "@workspace/api-server", "start"]
