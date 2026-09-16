@@ -8,6 +8,9 @@ RUN npm install -g pnpm
 # Copy everything
 COPY . .
 
+# Allow esbuild to run its build scripts
+RUN pnpm config set onlyBuiltDependencies "esbuild"
+
 # Install without frozen lockfile
 RUN pnpm install --no-frozen-lockfile
 
