@@ -6,10 +6,8 @@ RUN npm install -g pnpm@latest
 
 COPY . .
 
-# Force allow all build scripts (this fixes the esbuild error)
-RUN pnpm config set only-built-dependencies "*"
-
-RUN pnpm install --no-frozen-lockfile
+# Config + Install in the same command (prevents cache skip)
+RUN pnpm config set only-built-dependencies "*" && pnpm install --no-frozen-lockfile
 
 RUN pnpm --filter @workspace/api-server run build
 
