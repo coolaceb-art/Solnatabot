@@ -2,20 +2,15 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install latest pnpm
 RUN npm install -g pnpm@latest
 
-# Copy project files
 COPY . .
 
-# Allow esbuild to run its build scripts
-RUN echo "only-built-dependencies[]=esbuild" > .npmrc
+# Force allow all build scripts (this fixes the esbuild error)
+RUN pnpm config set only-built-dependencies "*"
 
-# Install dependencies
 RUN pnpm install --no-frozen-lockfile
 
-# Build the bot
 RUN pnpm --filter @workspace/api-server run build
 
-# Start the bot
 CMD ["pnpm", "--filter", "@workspace/api-server", "start"]
